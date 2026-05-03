@@ -1,0 +1,10 @@
+[Unit]
+Description=Run OpenClaw VPS backup on schedule
+
+[Timer]
+OnCalendar={{ openclaw_backup_on_calendar | default('daily') }}
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,107 @@
+- name: Disable SSH password auth
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^PasswordAuthentication\s+'
+    line: 'PasswordAuthentication no'
+  notify: Restart SSH
+
+- name: Disable root login (gated)
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^PermitRootLogin\s+'
+    line: 'PermitRootLogin no'
+  when: disable_root_login | bool
+  notify: Restart SSH
+
+- name: Guard against first-run SSH lockout
+  assert:
+    that:
+      - bootstrap_public_ssh_cidr is defined
+      - bootstrap_public_ssh_cidr | length > 0
+    fail_msg: >
+      bootstrap_public_ssh_cidr is empty while disable_root_login=false.
+      Set it to your current public IP /32 (same as Terraform ssh_source_ips)
+      before enabling UFW.
+  when: not (disable_root_login | bool)
+
+- name: Install ufw
+  apt:
+    name: ufw
+    state: present
+
+- name: UFW default deny incoming
+  ufw:
+    direction: incoming
+    policy: deny
+
+- name: UFW default allow outgoing
+  ufw:
+    direction: outgoing
+    policy: allow
+
+- name: Allow SSH from Tailscale range
+  ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    from_ip: "{{ tailscale_ssh_source_cidr }}"
+
+- name: Allow SSH from bootstrap public CIDR (optional)
+  ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    from_ip: "{{ bootstrap_public_ssh_cidr }}"
+  when: bootstrap_public_ssh_cidr is defined and bootstrap_public_ssh_cidr|length > 0
+
+- name: Remove previous bootstrap public SSH CIDR from UFW (optional cleanup)
+  ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    from_ip: "{{ bootstrap_public_ssh_cidr_cleanup }}"
+    delete: true
+  when: bootstrap_public_ssh_cidr_cleanup is defined and bootstrap_public_ssh_cidr_cleanup|length > 0
+
+- name: Allow HTTPS
+  ufw:
+    rule: allow
+    port: "443"
+    proto: tcp
+  when: allow_https | bool
+
+- name: Allow HTTP (optional)
+  ufw:
+    rule: allow
+    port: "80"
+    proto: tcp
+  when: allow_http | bool
+
+- name: Enable UFW
+  ufw:
+    state: enabled
+
+- name: Install fail2ban
+  apt:
+    name: fail2ban
+    state: present
+
+- name: Configure fail2ban jail.local
+  copy:
+    dest: /etc/fail2ban/jail.local
+    mode: "0644"
+    content: |
+      [DEFAULT]
+      bantime  = 1h
+      findtime = 10m
+      maxretry = 5
+
+      [sshd]
+      enabled = {{ 'true' if (enable_fail2ban_sshd | bool) else 'false' }}
+  notify: Restart fail2ban
+
+- name: Ensure fail2ban service is enabled
+  service:
+    name: fail2ban
+    state: started
+    enabled: true

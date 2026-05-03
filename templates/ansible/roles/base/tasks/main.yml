@@ -1,0 +1,283 @@
+- name: Update apt cache + upgrade
+  apt:
+    update_cache: yes
+    upgrade: dist
+
+- name: Install essentials (Docker + unattended upgrades + tooling)
+  apt:
+    name:
+      - ca-certificates
+      - curl
+      - file
+      - git
+      - gh
+      - jq
+      - screen
+      - python3
+      - python3-pip
+      - python3-venv
+      - pipx
+      - unattended-upgrades
+      - docker.io
+      - docker-compose-v2
+    state: present
+
+- name: Ensure docker service is enabled
+  service:
+    name: docker
+    state: started
+    enabled: true
+
+- name: Ensure Docker daemon log limits are configured
+  copy:
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "50m",
+          "max-file": "3"
+        }
+      }
+  register: docker_daemon_config
+
+- name: Restart Docker when daemon log limits change
+  service:
+    name: docker
+    state: restarted
+  when: docker_daemon_config.changed
+
+- name: Enable periodic unattended upgrades
+  copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    mode: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+- name: Configure unattended-upgrades policy (Ubuntu)
+  copy:
+    dest: /etc/apt/apt.conf.d/50unattended-upgrades
+    mode: "0644"
+    content: |
+      Unattended-Upgrade::Allowed-Origins {
+        "${distro_id}:${distro_codename}-security";
+        "${distro_id}ESMApps:${distro_codename}-apps-security";
+        "${distro_id}ESM:${distro_codename}-infra-security";
+      };
+
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+      Unattended-Upgrade::Automatic-Reboot "{{ 'true' if (auto_reboot | bool) else 'false' }}";
+      Unattended-Upgrade::Automatic-Reboot-Time "{{ auto_reboot_time }}";
+
+- name: Ensure unattended-upgrades service is enabled
+  service:
+    name: unattended-upgrades
+    state: started
+    enabled: true
+
+- name: Inspect swapfile
+  stat:
+    path: "{{ swap_file_path | default('/swapfile') }}"
+    get_checksum: false
+  register: swap_file_stat
+  when: swap_enabled | default(true) | bool
+
+- name: Refuse unexpected swapfile size changes
+  assert:
+    that:
+      - >-
+        (not swap_file_stat.stat.exists)
+        or
+        (swap_file_stat.stat.size | int == ((swap_size_mb | default(4096) | int) * 1024 * 1024))
+    fail_msg: "Existing swapfile size differs from swap_size_mb; resize manually to avoid unsafe live swap changes."
+  when: swap_enabled | default(true) | bool
+
+- name: Create swapfile
+  command: "fallocate -l {{ swap_size_mb | default(4096) }}M {{ swap_file_path | default('/swapfile') }}"
+  args:
+    creates: "{{ swap_file_path | default('/swapfile') }}"
+  when: swap_enabled | default(true) | bool
+
+- name: Secure swapfile permissions
+  file:
+    path: "{{ swap_file_path | default('/swapfile') }}"
+    owner: root
+    group: root
+    mode: "0600"
+  when: swap_enabled | default(true) | bool
+
+- name: Inspect swapfile signature
+  command: "file -b {{ swap_file_path | default('/swapfile') }}"
+  register: swap_file_type
+  changed_when: false
+  when: swap_enabled | default(true) | bool
+
+- name: Initialize swapfile
+  command: "mkswap {{ swap_file_path | default('/swapfile') }}"
+  when:
+    - swap_enabled | default(true) | bool
+    - "'swap file' not in swap_file_type.stdout"
+
+- name: Persist swapfile in fstab
+  lineinfile:
+    path: /etc/fstab
+    regexp: "^{{ (swap_file_path | default('/swapfile')) | regex_escape }}\\s+"
+    line: "{{ swap_file_path | default('/swapfile') }} none swap sw 0 0"
+    state: present
+  when: swap_enabled | default(true) | bool
+
+- name: Inspect active swap devices
+  command: swapon --show=NAME --noheadings
+  register: active_swap_devices
+  changed_when: false
+  when: swap_enabled | default(true) | bool
+
+- name: Enable swapfile
+  command: "swapon {{ swap_file_path | default('/swapfile') }}"
+  when:
+    - swap_enabled | default(true) | bool
+    - (swap_file_path | default('/swapfile')) not in (active_swap_devices.stdout_lines | map('trim') | list)
+
+- name: Configure swap swappiness
+  sysctl:
+    name: vm.swappiness
+    value: "{{ swap_swappiness | default(10) }}"
+    state: present
+    sysctl_file: /etc/sysctl.d/99-openclaw-swap.conf
+    reload: true
+  when: swap_enabled | default(true) | bool
+
+- name: Install Tailscale
+  shell: curl -fsSL https://tailscale.com/install.sh | sh
+  args:
+    creates: /usr/bin/tailscale
+
+- name: Install Claude Code (official installer)
+  shell: curl -fsSL https://claude.ai/install.sh | bash
+  args:
+    creates: /root/.local/bin/claude
+  when:
+    - install_claude_code | bool
+    - not (refresh_claude_code | bool)
+
+- name: Refresh Claude Code (official installer, forced)
+  shell: curl -fsSL https://claude.ai/install.sh | bash
+  when:
+    - install_claude_code | bool
+    - refresh_claude_code | bool
+
+- name: Expose Claude Code on system PATH
+  copy:
+    src: /root/.local/bin/claude
+    dest: /usr/local/bin/claude
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0755"
+  when: install_claude_code | bool
+
+- name: Check Claude Code version
+  shell: /usr/local/bin/claude --version
+  register: claude_version
+  changed_when: false
+  when: install_claude_code | bool
+
+- name: Install Node.js (for Codex CLI)
+  apt:
+    name: nodejs
+    state: present
+  when: install_codex_cli | bool
+
+- name: Check npm presence
+  command: npm --version
+  register: npm_version_check
+  changed_when: false
+  failed_when: false
+  when: install_codex_cli | bool
+
+- name: Install npm package from distro if npm is missing
+  apt:
+    name: npm
+    state: present
+  when:
+    - install_codex_cli | bool
+    - npm_version_check.rc != 0
+
+- name: Check Codex CLI presence
+  shell: command -v codex
+  register: codex_cli_path
+  changed_when: false
+  failed_when: false
+  when: install_codex_cli | bool
+
+- name: Install Codex CLI (npm)
+  shell: npm install -g @openai/codex
+  when:
+    - install_codex_cli | bool
+    - codex_cli_path.rc != 0
+
+- name: Check Codex CLI version
+  shell: codex --version
+  register: codex_version
+  changed_when: false
+  when: install_codex_cli | bool
+
+- name: Create admin user (optional)
+  user:
+    name: "{{ admin_user }}"
+    groups: "sudo,docker"
+    append: true
+    shell: /bin/bash
+    create_home: true
+  when: admin_user is defined and admin_user|length > 0
+
+- name: Create .ssh directory for admin user
+  file:
+    path: "/home/{{ admin_user }}/.ssh"
+    state: directory
+    owner: "{{ admin_user }}"
+    group: "{{ admin_user }}"
+    mode: "0700"
+  when: admin_user is defined and admin_user|length > 0
+
+- name: Allow passwordless sudo for admin user (optional)
+  copy:
+    dest: "/etc/sudoers.d/90-{{ admin_user }}-nopasswd"
+    owner: root
+    group: root
+    mode: "0440"
+    content: "{{ admin_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    validate: "/usr/sbin/visudo -cf %s"
+  when:
+    - admin_user is defined and admin_user|length > 0
+    - admin_user_passwordless_sudo | bool
+
+- name: Require admin SSH keys before disabling root login
+  assert:
+    that:
+      - admin_authorized_keys is defined
+      - admin_authorized_keys is sequence
+      - admin_authorized_keys is not string
+      - admin_authorized_keys | length > 0
+      - (admin_authorized_keys | map('trim') | reject('equalto', '') | list | length) == (admin_authorized_keys | length)
+    fail_msg: >
+      disable_root_login=true requires admin_authorized_keys to contain at least one non-empty SSH public key.
+  when:
+    - admin_user is defined and admin_user|length > 0
+    - disable_root_login | bool
+
+- name: Install explicit authorized_keys for admin user
+  copy:
+    dest: "/home/{{ admin_user }}/.ssh/authorized_keys"
+    owner: "{{ admin_user }}"
+    group: "{{ admin_user }}"
+    mode: "0600"
+    content: "{{ admin_authorized_keys | join('\n') ~ '\n' }}"
+  when:
+    - admin_user is defined and admin_user|length > 0
+    - admin_authorized_keys is defined
+    - admin_authorized_keys | length > 0

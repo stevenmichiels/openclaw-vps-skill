@@ -1,0 +1,5 @@
+services:
+  {{ app_service_name | default('sample-app') }}:
+    image: alpine:3.20
+    command: ["sh", "-lc", "echo '{{ app_message | default('Hello from sample app') }}' && sleep 3600"]
+    restart: unless-stopped

@@ -1,0 +1,44 @@
+- name: Create app dir
+  file:
+    path: "{{ app_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Render docker-compose.yml
+  template:
+    src: docker-compose.yml.j2
+    dest: "{{ app_dir }}/docker-compose.yml"
+    mode: "0644"
+
+- name: Check if optional .env template exists
+  stat:
+    path: "{{ role_path }}/files/.env"
+  register: app_env_template
+  delegate_to: localhost
+  become: false
+
+- name: Copy .env if present
+  copy:
+    src: .env
+    dest: "{{ app_dir }}/.env"
+    mode: "0600"
+  when: app_env_template.stat.exists
+
+- name: Start stack
+  command: docker compose up -d
+  args:
+    chdir: "{{ app_dir }}"
+  register: compose_up
+  changed_when: >-
+    ('Creating ' in compose_up.stdout) or
+    ('Created ' in compose_up.stdout) or
+    ('Recreating ' in compose_up.stdout) or
+    ('Starting ' in compose_up.stdout) or
+    ('Started ' in compose_up.stdout) or
+    ('Pulling ' in compose_up.stdout) or
+    ('Creating ' in compose_up.stderr) or
+    ('Created ' in compose_up.stderr) or
+    ('Recreating ' in compose_up.stderr) or
+    ('Starting ' in compose_up.stderr) or
+    ('Started ' in compose_up.stderr) or
+    ('Pulling ' in compose_up.stderr)

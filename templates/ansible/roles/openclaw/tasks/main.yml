@@ -1,0 +1,823 @@
+- name: Validate openclaw runtime mode
+  assert:
+    that:
+      - (openclaw_runtime_mode | default('container')) in ['container', 'systemd']
+    fail_msg: "openclaw_runtime_mode must be either 'container' or 'systemd'."
+
+- name: Set openclaw runtime facts
+  set_fact:
+    openclaw_runtime_mode_effective: "{{ openclaw_runtime_mode | default('container') }}"
+    openclaw_compose_file_effective: "{{ openclaw_compose_file | default(openclaw_env_dir ~ '/docker-compose.yml') }}"
+    openclaw_container_base_image_effective: "{{ openclaw_container_base_image | default('ghcr.io/openclaw/openclaw:2026.5.2') }}"
+    openclaw_container_image_effective: "{{ openclaw_container_image | default('openclaw-runtime:2026.5.2-tools') }}"
+    openclaw_runtime_image_build_dir_effective: "{{ openclaw_runtime_image_build_dir | default(openclaw_dir ~ '/runtime-image') }}"
+
+- name: Set openclaw ownership facts
+  set_fact:
+    openclaw_state_owner_effective: "{{ '1000' if openclaw_runtime_mode_effective == 'container' else openclaw_user }}"
+    openclaw_state_group_effective: "{{ '1000' if openclaw_runtime_mode_effective == 'container' else openclaw_group }}"
+
+- name: Validate openclaw cost profile cache retention value
+  assert:
+    that:
+      - (openclaw_cost_profile_cache_retention | default('short')) in ['none', 'short', 'long']
+    fail_msg: "openclaw_cost_profile_cache_retention must be one of: none, short, long."
+
+- name: Validate openclaw cost profile heartbeat target value
+  assert:
+    that:
+      - (openclaw_cost_profile_heartbeat_target | default('none')) in ['last', 'whatsapp', 'telegram', 'discord', 'googlechat', 'slack', 'msteams', 'signal', 'imessage', 'none']
+    fail_msg: "openclaw_cost_profile_heartbeat_target must be a supported heartbeat target or none."
+
+- name: Install openclaw common runtime packages
+  apt:
+    name:
+      - git
+      - curl
+      - jq
+      - openssl
+      - ca-certificates
+    state: present
+
+- name: Install openclaw container runtime packages
+  apt:
+    name:
+      - docker.io
+      - docker-compose-v2
+    state: present
+  when: openclaw_runtime_mode_effective == 'container'
+
+- name: Ensure Docker daemon is enabled and started
+  systemd:
+    name: docker
+    enabled: true
+    state: started
+  when: openclaw_runtime_mode_effective == 'container'
+
+- name: Install openclaw host runtime packages
+  apt:
+    name:
+      - nodejs
+    state: present
+  when: openclaw_runtime_mode_effective == 'systemd'
+
+- name: Check npm presence for openclaw systemd mode
+  command: npm --version
+  register: openclaw_npm_version_check
+  changed_when: false
+  failed_when: false
+  when: openclaw_runtime_mode_effective == 'systemd'
+
+- name: Install distro npm only if npm is missing
+  apt:
+    name:
+      - npm
+    state: present
+  when:
+    - openclaw_runtime_mode_effective == 'systemd'
+    - openclaw_npm_version_check.rc != 0
+
+- name: Ensure openclaw group exists
+  group:
+    name: "{{ openclaw_group }}"
+    state: present
+    system: true
+
+- name: Allow admin user to browse openclaw protected paths
+  user:
+    name: "{{ admin_user }}"
+    groups: "{{ openclaw_group }}"
+    append: true
+  when:
+    - admin_user is defined
+    - admin_user | length > 0
+    - admin_user != openclaw_user
+
+- name: Ensure openclaw service user exists
+  user:
+    name: "{{ openclaw_user }}"
+    state: present
+
+- name: Ensure openclaw directories exist
+  file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ openclaw_dir }}"
+      owner: "{{ openclaw_user }}"
+      group: "{{ openclaw_group }}"
+      mode: "0750"
+    - path: "{{ openclaw_data_dir }}"
+      owner: "{{ openclaw_state_owner_effective }}"
+      group: "{{ openclaw_state_group_effective }}"
+      mode: "0750"
+    - path: "{{ openclaw_config_dir }}"
+      owner: "{{ openclaw_state_owner_effective }}"
+      group: "{{ openclaw_state_group_effective }}"
+      mode: "0750"
+    - path: "{{ openclaw_workspace_dir }}"
+      owner: "{{ openclaw_state_owner_effective }}"
+      group: "{{ openclaw_state_group_effective }}"
+      mode: "0750"
+    - path: "{{ openclaw_workspace_dir }}/out"
+      owner: "{{ openclaw_state_owner_effective }}"
+      group: "{{ openclaw_state_group_effective }}"
+      mode: "0750"
+    - path: "{{ openclaw_workspace_dir }}/scripts"
+      owner: "{{ openclaw_state_owner_effective }}"
+      group: "{{ openclaw_state_group_effective }}"
+      mode: "0750"
+    - path: "{{ openclaw_workspace_dir }}/skills"
+      owner: "{{ openclaw_state_owner_effective }}"
+      group: "{{ openclaw_state_group_effective }}"
+      mode: "0750"
+    - path: "{{ openclaw_workspace_dir }}/skills/chart-media"
+      owner: "{{ openclaw_state_owner_effective }}"
+      group: "{{ openclaw_state_group_effective }}"
+      mode: "0750"
+    - path: "{{ openclaw_ssh_dir | default(openclaw_data_dir ~ '/.ssh') }}"
+      owner: "{{ openclaw_state_owner_effective }}"
+      group: "{{ openclaw_state_group_effective }}"
+      mode: "0700"
+    - path: "{{ openclaw_env_dir }}"
+      owner: root
+      group: "{{ openclaw_group }}"
+      mode: "0750"
+    - path: "{{ openclaw_runtime_image_build_dir_effective }}"
+      owner: root
+      group: root
+      mode: "0755"
+    - path: "{{ openclaw_monitor_state_dir | default('/var/lib/openclaw-vps-monitor') }}"
+      owner: root
+      group: root
+      mode: "0700"
+
+- name: Install openclaw runtime image Dockerfile (container mode)
+  template:
+    src: Dockerfile.runtime.j2
+    dest: "{{ openclaw_runtime_image_build_dir_effective }}/Dockerfile"
+    owner: root
+    group: root
+    mode: "0644"
+  register: openclaw_runtime_dockerfile
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_build_runtime_image | default(false) | bool
+
+- name: Inspect openclaw runtime image (container mode)
+  command: docker image inspect "{{ openclaw_container_image_effective }}"
+  register: openclaw_runtime_image_inspect
+  changed_when: false
+  failed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_build_runtime_image | default(false) | bool
+
+- name: Build openclaw runtime image with runtime tools (container mode)
+  command: >-
+    docker build
+    --build-arg OPENCLAW_BASE_IMAGE={{ openclaw_container_base_image_effective }}
+    -t {{ openclaw_container_image_effective }}
+    {{ openclaw_runtime_image_build_dir_effective }}
+  register: openclaw_runtime_image_build
+  changed_when: true
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_build_runtime_image | default(false) | bool
+    - openclaw_runtime_dockerfile.changed or openclaw_runtime_image_inspect.rc != 0 or (openclaw_runtime_image_rebuild | default(false) | bool)
+
+- name: Create assistant instructions file if missing
+  template:
+    src: instructions.md.j2
+    dest: "{{ openclaw_config_dir }}/instructions.md"
+    owner: "{{ openclaw_user }}"
+    group: "{{ openclaw_group }}"
+    mode: "0600"
+    force: false
+
+- name: Install chart/media render helper
+  template:
+    src: render_chart.py.j2
+    dest: "{{ openclaw_workspace_dir }}/scripts/render_chart.py"
+    owner: "{{ openclaw_state_owner_effective }}"
+    group: "{{ openclaw_state_group_effective }}"
+    mode: "0750"
+  when: openclaw_chart_media_enabled | default(true) | bool
+
+- name: Install chart/media workspace skill
+  template:
+    src: chart-media-skill.md.j2
+    dest: "{{ openclaw_workspace_dir }}/skills/chart-media/SKILL.md"
+    owner: "{{ openclaw_state_owner_effective }}"
+    group: "{{ openclaw_state_group_effective }}"
+    mode: "0640"
+  when: openclaw_chart_media_enabled | default(true) | bool
+
+- name: Create openclaw env file if missing
+  template:
+    src: env.j2
+    dest: "{{ openclaw_env_file }}"
+    owner: root
+    group: "{{ openclaw_group }}"
+    mode: "0640"
+    force: false
+
+- name: Ensure openclaw image line is present in env file (container mode)
+  lineinfile:
+    path: "{{ openclaw_env_file }}"
+    regexp: '^OPENCLAW_IMAGE='
+    line: "OPENCLAW_IMAGE={{ openclaw_container_image_effective }}"
+  when: openclaw_runtime_mode_effective == 'container'
+
+- name: Ensure openclaw gateway bind line is present in env file (container mode)
+  lineinfile:
+    path: "{{ openclaw_env_file }}"
+    regexp: '^OPENCLAW_GATEWAY_BIND='
+    line: "OPENCLAW_GATEWAY_BIND={{ openclaw_gateway_bind | default('lan') }}"
+  when: openclaw_runtime_mode_effective == 'container'
+
+- name: Ensure openclaw ssh dir line is present in env file (container mode)
+  lineinfile:
+    path: "{{ openclaw_env_file }}"
+    regexp: '^OPENCLAW_SSH_DIR='
+    line: "OPENCLAW_SSH_DIR={{ openclaw_ssh_dir | default(openclaw_data_dir ~ '/.ssh') }}"
+  when: openclaw_runtime_mode_effective == 'container'
+
+- name: Generate openclaw runtime GitHub SSH key if missing
+  command: >-
+    ssh-keygen -t ed25519
+    -f {{ openclaw_ssh_dir | default(openclaw_data_dir ~ '/.ssh') }}/id_ed25519_github_openclaw
+    -C openclaw-vps-runtime-github
+    -N ''
+  args:
+    creates: "{{ openclaw_ssh_dir | default(openclaw_data_dir ~ '/.ssh') }}/id_ed25519_github_openclaw"
+
+- name: Install openclaw runtime SSH config
+  copy:
+    dest: "{{ openclaw_ssh_dir | default(openclaw_data_dir ~ '/.ssh') }}/config"
+    owner: "{{ openclaw_state_owner_effective }}"
+    group: "{{ openclaw_state_group_effective }}"
+    mode: "0600"
+    content: |
+      Host github.com
+        HostName github.com
+        User git
+        IdentityFile /home/node/.ssh/id_ed25519_github_openclaw
+        IdentitiesOnly yes
+        StrictHostKeyChecking accept-new
+
+- name: Ensure openclaw runtime SSH key ownership and permissions
+  file:
+    path: "{{ item.path }}"
+    owner: "{{ openclaw_state_owner_effective }}"
+    group: "{{ openclaw_state_group_effective }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ openclaw_ssh_dir | default(openclaw_data_dir ~ '/.ssh') }}"
+      mode: "0700"
+    - path: "{{ openclaw_ssh_dir | default(openclaw_data_dir ~ '/.ssh') }}/id_ed25519_github_openclaw"
+      mode: "0600"
+    - path: "{{ openclaw_ssh_dir | default(openclaw_data_dir ~ '/.ssh') }}/id_ed25519_github_openclaw.pub"
+      mode: "0644"
+
+- name: Read openclaw env file for gateway token management
+  slurp:
+    src: "{{ openclaw_env_file }}"
+  register: openclaw_env_for_gateway_token
+
+- name: Detect whether openclaw gateway token needs generation
+  set_fact:
+    openclaw_gateway_token_needs_generation: >-
+      {{
+        ((openclaw_env_for_gateway_token.content | b64decode | regex_search('(?m)^OPENCLAW_GATEWAY_TOKEN=')) is none)
+        or
+        ((openclaw_env_for_gateway_token.content | b64decode | regex_search('(?m)^OPENCLAW_GATEWAY_TOKEN=(?:__SET_ME__|placeholder)?\\s*$')) is not none)
+      }}
+
+- name: Generate openclaw gateway token when enabled and placeholder/missing
+  command: openssl rand -hex 32
+  register: openclaw_generated_gateway_token
+  changed_when: true
+  no_log: true
+  when:
+    - openclaw_auto_generate_gateway_token | default(false) | bool
+    - openclaw_gateway_token_needs_generation | bool
+
+- name: Write generated openclaw gateway token to env file
+  lineinfile:
+    path: "{{ openclaw_env_file }}"
+    regexp: '^OPENCLAW_GATEWAY_TOKEN='
+    line: "OPENCLAW_GATEWAY_TOKEN={{ openclaw_generated_gateway_token.stdout }}"
+    insertafter: BOF
+  no_log: true
+  when:
+    - openclaw_auto_generate_gateway_token | default(false) | bool
+    - openclaw_gateway_token_needs_generation | bool
+
+- name: Report generated openclaw gateway token update
+  debug:
+    msg: "Generated OPENCLAW_GATEWAY_TOKEN in {{ openclaw_env_file }} (openclaw_auto_generate_gateway_token=true)."
+  when:
+    - openclaw_auto_generate_gateway_token | default(false) | bool
+    - openclaw_gateway_token_needs_generation | bool
+
+- name: Ensure openclaw data directory ownership is recursive
+  file:
+    path: "{{ openclaw_data_dir }}"
+    owner: "{{ openclaw_state_owner_effective }}"
+    group: "{{ openclaw_state_group_effective }}"
+    recurse: true
+
+- name: Read openclaw env file before enabling service
+  slurp:
+    src: "{{ openclaw_env_file }}"
+  register: openclaw_env_raw
+  when: openclaw_enable_service | bool
+
+- name: Refuse to enable service with placeholder secrets
+  assert:
+    that:
+      - "(openclaw_env_raw.content | b64decode | regex_search('(?m)^[A-Za-z_][A-Za-z0-9_]*=__SET_ME__$')) is none"
+      - "(openclaw_env_raw.content | b64decode | regex_search('(?m)^OPENCLAW_GATEWAY_TOKEN=')) is not none"
+      - "(openclaw_env_raw.content | b64decode | regex_search('(?m)^OPENCLAW_GATEWAY_TOKEN=(?:__SET_ME__|placeholder)?\\s*$')) is none"
+    fail_msg: "Set a non-placeholder OPENCLAW_GATEWAY_TOKEN in {{ openclaw_env_file }} (or enable openclaw_auto_generate_gateway_token=true) before enabling openclaw."
+  when: openclaw_enable_service | bool
+
+- name: Check whether openclaw CLI exists
+  stat:
+    path: "{{ openclaw_cli_path }}"
+  register: openclaw_cli_stat
+  when: openclaw_runtime_mode_effective == 'systemd'
+
+- name: Install or update openclaw CLI globally
+  command: npm install -g openclaw@latest
+  when:
+    - openclaw_runtime_mode_effective == 'systemd'
+    - (not openclaw_cli_stat.stat.exists) or (openclaw_update_cli | bool)
+
+- name: Stop container stack when using systemd runtime
+  command: docker compose -f "{{ openclaw_compose_file_effective }}" down
+  failed_when: false
+  changed_when: false
+  when: openclaw_runtime_mode_effective == 'systemd'
+
+- name: Remove compose file when using systemd runtime
+  file:
+    path: "{{ openclaw_compose_file_effective }}"
+    state: absent
+  when: openclaw_runtime_mode_effective == 'systemd'
+
+- name: Install openclaw systemd unit
+  template:
+    src: openclaw.service.j2
+    dest: "/etc/systemd/system/{{ openclaw_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  when: openclaw_runtime_mode_effective == 'systemd'
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: true
+  when: openclaw_runtime_mode_effective == 'systemd'
+
+- name: Ensure openclaw service is enabled and started (systemd mode)
+  systemd:
+    name: "{{ openclaw_service_name }}"
+    enabled: true
+    state: started
+  when:
+    - openclaw_runtime_mode_effective == 'systemd'
+    - openclaw_enable_service | bool
+
+- name: Ensure openclaw service is disabled and stopped (systemd mode)
+  systemd:
+    name: "{{ openclaw_service_name }}"
+    enabled: false
+    state: stopped
+  failed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'systemd'
+    - not (openclaw_enable_service | bool)
+
+- name: Install openclaw compose file (container mode)
+  template:
+    src: docker-compose.yml.j2
+    dest: "{{ openclaw_compose_file_effective }}"
+    owner: root
+    group: root
+    mode: "0644"
+  when: openclaw_runtime_mode_effective == 'container'
+
+- name: Ensure systemd service is disabled and stopped (container mode)
+  systemd:
+    name: "{{ openclaw_service_name }}"
+    enabled: false
+    state: stopped
+  failed_when: false
+  when: openclaw_runtime_mode_effective == 'container'
+
+- name: Pull openclaw image (container mode)
+  command: docker compose -f "{{ openclaw_compose_file_effective }}" pull
+  register: openclaw_compose_pull_result
+  changed_when: >
+    (
+      (openclaw_compose_pull_result.stdout | default('')) ~ '\n' ~
+      (openclaw_compose_pull_result.stderr | default(''))
+    ) is search('Downloaded newer image|Pull complete|Status: Downloaded newer image|Downloaded|Pulling fs layer')
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_compose_pull | default(false) | bool
+
+- name: Stop openclaw container stack before config updates (container mode)
+  command: docker compose -f "{{ openclaw_compose_file_effective }}" --profile cli down --remove-orphans
+  failed_when: false
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+
+- name: Ensure openclaw gateway mode is local (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set gateway.mode local
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+
+- name: Ensure openclaw gateway bind mode matches playbook (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set gateway.bind
+    {{ openclaw_gateway_bind | default('lan') }}
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+
+- name: Ensure control UI allowed origins are set for local dashboard (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    gateway.controlUi.allowedOrigins
+    '["http://localhost:{{ openclaw_gateway_port | default(18789) }}","http://127.0.0.1:{{ openclaw_gateway_port | default(18789) }}"]'
+    --strict-json
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+
+- name: Ensure default cache retention is configured (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    agents.defaults.params.cacheRetention
+    {{ openclaw_cost_profile_cache_retention | default('short') }}
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+
+- name: Ensure context pruning mode is cache-ttl (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    agents.defaults.contextPruning.mode
+    cache-ttl
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+
+- name: Ensure context pruning TTL is configured (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    agents.defaults.contextPruning.ttl
+    {{ openclaw_cost_profile_context_pruning_ttl | default('55m') }}
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+
+- name: Ensure heartbeat schedule is configured (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    agents.defaults.heartbeat.every
+    {{ openclaw_cost_profile_heartbeat_every | default('55m') }}
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+
+- name: Ensure heartbeat uses light context (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    agents.defaults.heartbeat.lightContext
+    {{ (openclaw_cost_profile_heartbeat_light_context | default(true)) | ternary('true', 'false') }}
+    --strict-json
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+
+- name: Ensure heartbeat uses isolated session (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    agents.defaults.heartbeat.isolatedSession
+    {{ (openclaw_cost_profile_heartbeat_isolated_session | default(true)) | ternary('true', 'false') }}
+    --strict-json
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+
+- name: Ensure heartbeat target is configured (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    agents.defaults.heartbeat.target
+    {{ openclaw_cost_profile_heartbeat_target | default('none') }}
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+
+- name: Ensure heartbeat model override is configured when provided (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    agents.defaults.heartbeat.model
+    '{{ openclaw_cost_profile_heartbeat_model }}'
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+    - (openclaw_cost_profile_heartbeat_model | default('')) | length > 0
+
+- name: Ensure Codex runtime plugin is enabled when requested (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    plugins.entries.codex
+    '{"enabled":true}'
+    --strict-json
+    --merge
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+    - openclaw_codex_plugin_enabled | default(true) | bool
+
+- name: Ensure primary model override is configured when provided (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    agents.defaults.model.primary
+    '{{ openclaw_cost_profile_model_primary }}'
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+    - (openclaw_cost_profile_model_primary | default('')) | length > 0
+
+- name: Ensure default agent runtime is configured when provided (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    agents.defaults.agentRuntime
+    '{{ {"id": openclaw_agent_runtime_id} | to_json }}'
+    --strict-json
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+    - (openclaw_agent_runtime_id | default('')) | length > 0
+
+- name: Ensure default agent runtime is unset when not provided (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config unset
+    agents.defaults.agentRuntime
+  changed_when: false
+  failed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+    - (openclaw_agent_runtime_id | default('')) | length == 0
+
+- name: Ensure model fallback list is configured when provided (container mode)
+  command: >-
+    timeout {{ openclaw_config_set_timeout_seconds | default(60) }} docker compose -f "{{ openclaw_compose_file_effective }}" run --rm --no-deps
+    --entrypoint node openclaw-gateway dist/index.js config set
+    agents.defaults.model.fallbacks
+    '{{ openclaw_cost_profile_model_fallbacks | default([]) | to_json }}'
+    --strict-json
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+    - openclaw_cost_profile_enabled | default(true) | bool
+    - openclaw_cost_profile_model_fallbacks is defined
+
+- name: Remove stale openclaw gateway run containers after config updates (container mode)
+  shell: |
+    ids="$(docker ps -aq --filter 'name=openclaw-openclaw-gateway-run-')"
+    if [ -n "$ids" ]; then
+      docker rm -f $ids >/dev/null
+    fi
+  args:
+    executable: /bin/bash
+  failed_when: false
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+
+- name: Start openclaw container stack (container mode)
+  command: docker compose -f "{{ openclaw_compose_file_effective }}" up -d
+  register: openclaw_compose_up_result
+  changed_when: >
+    (
+      (openclaw_compose_up_result.stdout | default('')) ~ '\n' ~
+      (openclaw_compose_up_result.stderr | default(''))
+    ) is search('Creating|Recreating|Starting|Stopping|Removing|Created|Pulled')
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - openclaw_enable_service | bool
+
+- name: Install openclaw-vps status script
+  template:
+    src: openclaw-vps-status.j2
+    dest: /usr/local/sbin/openclaw-vps-status
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Install openclaw-vps wrapper command
+  template:
+    src: openclaw-vps.j2
+    dest: /usr/local/bin/openclaw-vps
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Ensure openclaw backup directory exists
+  file:
+    path: "{{ openclaw_backup_dir | default('/var/backups/openclaw-vps') }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Install openclaw-vps backup script
+  template:
+    src: openclaw-vps-backup.j2
+    dest: /usr/local/sbin/openclaw-vps-backup
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install openclaw-vps backup service
+  template:
+    src: openclaw-vps-backup.service.j2
+    dest: /etc/systemd/system/openclaw-vps-backup.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install openclaw-vps backup timer
+  template:
+    src: openclaw-vps-backup.timer.j2
+    dest: /etc/systemd/system/openclaw-vps-backup.timer
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install openclaw docker cleanup script
+  template:
+    src: openclaw-docker-cleanup.j2
+    dest: /usr/local/sbin/openclaw-docker-cleanup
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install openclaw docker cleanup service
+  template:
+    src: openclaw-docker-cleanup.service.j2
+    dest: /etc/systemd/system/openclaw-docker-cleanup.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install openclaw docker cleanup timer
+  template:
+    src: openclaw-docker-cleanup.timer.j2
+    dest: /etc/systemd/system/openclaw-docker-cleanup.timer
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install openclaw-vps release check script
+  template:
+    src: openclaw-vps-release-check.j2
+    dest: /usr/local/sbin/openclaw-vps-release-check
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install openclaw-vps release check service
+  template:
+    src: openclaw-vps-release-check.service.j2
+    dest: /etc/systemd/system/openclaw-vps-release-check.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install openclaw-vps release check timer
+  template:
+    src: openclaw-vps-release-check.timer.j2
+    dest: /etc/systemd/system/openclaw-vps-release-check.timer
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install openclaw-vps healthcheck alert script
+  template:
+    src: openclaw-vps-healthcheck.j2
+    dest: /usr/local/sbin/openclaw-vps-healthcheck
+    owner: root
+    group: root
+    mode: "0750"
+
+- name: Install openclaw-vps healthcheck service
+  template:
+    src: openclaw-vps-healthcheck.service.j2
+    dest: /etc/systemd/system/openclaw-vps-healthcheck.service
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Install openclaw-vps healthcheck timer
+  template:
+    src: openclaw-vps-healthcheck.timer.j2
+    dest: /etc/systemd/system/openclaw-vps-healthcheck.timer
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Reload systemd for openclaw operational timers
+  systemd:
+    daemon_reload: true
+
+- name: Ensure openclaw-vps backup timer state
+  systemd:
+    name: openclaw-vps-backup.timer
+    enabled: "{{ openclaw_backup_timer_enabled | default(true) | bool }}"
+    state: "{{ (openclaw_backup_timer_enabled | default(true) | bool) | ternary('started', 'stopped') }}"
+
+- name: Ensure openclaw docker cleanup timer state
+  systemd:
+    name: openclaw-docker-cleanup.timer
+    enabled: "{{ openclaw_docker_cleanup_timer_enabled | default(true) | bool }}"
+    state: "{{ (openclaw_docker_cleanup_timer_enabled | default(true) | bool) | ternary('started', 'stopped') }}"
+
+- name: Ensure openclaw-vps release check timer state
+  systemd:
+    name: openclaw-vps-release-check.timer
+    enabled: "{{ openclaw_release_check_timer_enabled | default(true) | bool }}"
+    state: "{{ (openclaw_release_check_timer_enabled | default(true) | bool) | ternary('started', 'stopped') }}"
+
+- name: Ensure openclaw-vps healthcheck timer state
+  systemd:
+    name: openclaw-vps-healthcheck.timer
+    enabled: "{{ openclaw_healthcheck_timer_enabled | default(true) | bool }}"
+    state: "{{ (openclaw_healthcheck_timer_enabled | default(true) | bool) | ternary('started', 'stopped') }}"
+
+- name: Stop openclaw container stack when disabled (container mode)
+  command: docker compose -f "{{ openclaw_compose_file_effective }}" down
+  failed_when: false
+  changed_when: false
+  when:
+    - openclaw_runtime_mode_effective == 'container'
+    - not (openclaw_enable_service | bool)

@@ -1,0 +1,44 @@
+# Copy to vars/local.yml and keep that file out of git.
+# This file must contain only non-secret deployment identity/config values.
+
+admin_user: "<admin_user>"
+admin_authorized_keys:
+  - "ssh-ed25519 <public-key> <label>"
+
+# First public bootstrap must use your current public IP /32.
+# Leave empty only when you expect the playbook to fail before UFW changes.
+# After Tailscale SSH is proven and root login is disabled, existing servers may
+# set this to "100.64.0.0/10" for Tailscale-only runs.
+bootstrap_public_ssh_cidr: ""
+tailscale_ssh_source_cidr: "100.64.0.0/10"
+
+# Runtime start is opt-in for the public template. Enable after /etc/openclaw/.env
+# is configured on the VPS and status checks are ready.
+openclaw_enable_service: false
+
+# Firecrawl is optional. Before enabling, pin the Firecrawl image tags/digests or
+# intentionally set firecrawl_allow_floating_images=true.
+install_firecrawl: false
+firecrawl_enable_service: false
+
+# Optional operator preferences.
+openclaw_cost_profile_heartbeat_target: "telegram"
+openclaw_chart_media_enabled: true
+# ChatGPT/Codex subscription route defaults are already enabled in site.yml.
+# Uncomment only to override locally.
+# openclaw_codex_plugin_enabled: true
+# openclaw_agent_runtime_id: ""
+# openclaw_cost_profile_model_primary: "openai-codex/gpt-5.5"
+
+# Non-secret GitHub SSH identity labels used by the runbook examples.
+github_admin_host_alias: "gh-openclaw-vps"
+github_admin_ssh_key_path: "~/.ssh/id_ed25519_gh_openclaw_vps"
+github_admin_ssh_key_title: "openclaw-vps-admin-<YYYY-MM-DD>"
+github_runtime_ssh_key_title: "openclaw-vps-runtime-<YYYY-MM-DD>"
+
+# Optional host-side repo convenience path.
+host_repos_dir: "/home/<admin_user>/repos"
+
+# Optional placeholder app deployed by the example app role.
+app_service_name: "sample-app"
+app_message: "Hello from sample app"

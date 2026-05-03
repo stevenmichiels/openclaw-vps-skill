@@ -1,0 +1,10 @@
+[Unit]
+Description=Run OpenClaw Docker cleanup on schedule
+
+[Timer]
+OnCalendar={{ openclaw_docker_cleanup_on_calendar | default('weekly') }}
+Persistent=true
+RandomizedDelaySec=30m
+
+[Install]
+WantedBy=timers.target

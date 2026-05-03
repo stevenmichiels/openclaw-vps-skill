@@ -1,0 +1,137 @@
+#!/usr/bin/env python3
+"""Render simple chart specs to PNG for OpenClaw channel media delivery."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+from typing import Any
+
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
+
+
+def workspace_root() -> Path:
+    default_root = Path.home() / ".openclaw" / "workspace"
+    return Path(os.environ.get("OPENCLAW_RUNTIME_WORKSPACE", default_root)).resolve()
+
+
+def safe_workspace_path(raw_path: str, root: Path) -> Path:
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = root / path
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise SystemExit(f"path must stay under workspace {root}: {resolved}") from exc
+    return resolved
+
+
+def bounded_float(value: Any, default: float, minimum: float, maximum: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def normalize_series(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    series = spec.get("series")
+    if isinstance(series, list) and series:
+        normalized = [item for item in series if isinstance(item, dict)]
+        if normalized:
+            return normalized
+    if "x" in spec and "y" in spec:
+        return [{"label": spec.get("label", "value"), "x": spec["x"], "y": spec["y"]}]
+    raise SystemExit("chart spec must include a non-empty series list or top-level x/y arrays")
+
+
+def render(spec: dict[str, Any], output_path: Path) -> None:
+    width = bounded_float(spec.get("width"), 8.0, 3.0, 12.0)
+    height = bounded_float(spec.get("height"), 4.8, 2.0, 8.0)
+    dpi = int(bounded_float(spec.get("dpi"), 150, 72, 200))
+    kind = str(spec.get("kind", "line")).lower()
+
+    fig, ax = plt.subplots(figsize=(width, height), dpi=dpi)
+
+    for item in normalize_series(spec):
+        label = str(item.get("label", "series"))
+        x_values = item.get("x")
+        y_values = item.get("y")
+        if not isinstance(x_values, list) or not isinstance(y_values, list):
+            raise SystemExit(f"series {label!r} must include x and y arrays")
+        if len(x_values) != len(y_values):
+            raise SystemExit(f"series {label!r} has mismatched x/y lengths")
+        color = item.get("color")
+        if kind == "bar":
+            ax.bar(x_values, y_values, label=label, color=color)
+        elif kind == "scatter":
+            ax.scatter(x_values, y_values, label=label, color=color)
+        else:
+            ax.plot(x_values, y_values, marker=item.get("marker", "o"), label=label, color=color)
+
+    title = spec.get("title")
+    if title:
+        ax.set_title(str(title))
+    xlabel = spec.get("xlabel")
+    if xlabel:
+        ax.set_xlabel(str(xlabel))
+    ylabel = spec.get("ylabel")
+    if ylabel:
+        ax.set_ylabel(str(ylabel))
+    if len(normalize_series(spec)) > 1 or spec.get("legend", True):
+        ax.legend()
+    if spec.get("grid", True):
+        ax.grid(True, alpha=0.25)
+
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, format="png")
+    plt.close(fig)
+
+
+def self_test_spec() -> dict[str, Any]:
+    return {
+        "title": "Chart media self-test",
+        "xlabel": "step",
+        "ylabel": "value",
+        "series": [
+            {"label": "example", "x": ["A", "B", "C", "D"], "y": [2, 5, 3, 7]},
+        ],
+    }
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Render a simple JSON chart spec to PNG.")
+    parser.add_argument("--input", help="JSON chart spec path under the OpenClaw workspace")
+    parser.add_argument("--output", default="out/chart.png", help="PNG output path under the OpenClaw workspace")
+    parser.add_argument("--self-test", action="store_true", help="Render a sample chart")
+    args = parser.parse_args(argv)
+
+    root = workspace_root()
+    output_path = safe_workspace_path(args.output, root)
+
+    if args.self_test:
+        spec = self_test_spec()
+    else:
+        if not args.input:
+            parser.error("--input is required unless --self-test is used")
+        input_path = safe_workspace_path(args.input, root)
+        spec = json.loads(input_path.read_text(encoding="utf-8"))
+        if not isinstance(spec, dict):
+            raise SystemExit("chart spec must be a JSON object")
+
+    render(spec, output_path)
+    print(f"MEDIA:{output_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

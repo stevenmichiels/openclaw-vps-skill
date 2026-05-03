@@ -1,0 +1,8 @@
+[Unit]
+Description=Prune unused Docker containers, images, and build cache for OpenClaw VPS
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/openclaw-docker-cleanup

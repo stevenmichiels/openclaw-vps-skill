@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+set -u
+
+COMPOSE_FILE="{{ openclaw_compose_file_effective }}"
+ENV_FILE="{{ openclaw_env_file }}"
+GATEWAY_PORT="{{ openclaw_gateway_port | default(18789) }}"
+BRIDGE_PORT="{{ openclaw_bridge_port | default(18790) }}"
+EXPECTED_MODEL="{{ openclaw_cost_profile_model_primary | default('openai-codex/gpt-5.5') }}"
+EXPECTED_FALLBACKS='{{ openclaw_cost_profile_model_fallbacks | default([]) | to_json }}'
+EXPECTED_AGENT_RUNTIME_ID="{{ openclaw_agent_runtime_id | default('') }}"
+EXPECTED_CODEX_PLUGIN_ENABLED="{{ (openclaw_codex_plugin_enabled | default(true)) | ternary('true', 'false') }}"
+EXPECTED_CHART_MEDIA_ENABLED="{{ (openclaw_chart_media_enabled | default(true)) | ternary('true', 'false') }}"
+BACKUP_DIR="{{ openclaw_backup_dir | default('/var/backups/openclaw-vps') }}"
+
+failures=0
+
+ok() {
+  printf 'OK %s\n' "$*"
+}
+
+warn() {
+  printf 'WARN %s\n' "$*"
+}
+
+fail() {
+  printf 'FAIL %s\n' "$*"
+  failures=$((failures + 1))
+}
+
+has_env_value() {
+  local key="$1" value
+  value="$(grep -E "^${key}=" "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  [ -n "$value" ] && [ "$value" != "placeholder" ] && [ "$value" != "__SET_ME__" ]
+}
+
+if tailscale ip -4 >/tmp/openclaw-vps-tailscale-ip 2>/dev/null; then
+  ts_ip="$(cat /tmp/openclaw-vps-tailscale-ip | head -n1)"
+  case "$ts_ip" in
+    100.*) ok "tailscale_ip=$ts_ip" ;;
+    *) fail "tailscale_ip_unexpected=$ts_ip" ;;
+  esac
+else
+  fail "tailscale_not_ready"
+fi
+
+if curl -fsS "http://127.0.0.1:${GATEWAY_PORT}/healthz" >/tmp/openclaw-vps-health.json 2>/dev/null; then
+  ok "gateway_health=$(cat /tmp/openclaw-vps-health.json)"
+else
+  fail "gateway_health_unreachable"
+fi
+
+bad_ports="$(ss -ltn | awk -v gp=":${GATEWAY_PORT}" -v bp=":${BRIDGE_PORT}" '($4 ~ gp "$" || $4 ~ bp "$") && $4 !~ /^127[.]0[.]0[.]1:/ { print $4 }')"
+if [ -z "$bad_ports" ]; then
+  ok "gateway_ports_loopback_only"
+else
+  fail "gateway_ports_exposed=$bad_ports"
+fi
+
+if docker compose -f "$COMPOSE_FILE" ps --services --filter status=running 2>/dev/null | grep -qx openclaw-gateway; then
+  ok "openclaw_gateway_container_running"
+else
+  fail "openclaw_gateway_container_not_running"
+fi
+
+unexpected_services="$(docker compose -f "$COMPOSE_FILE" ps --services --filter status=running 2>/dev/null | grep -v '^openclaw-gateway$' || true)"
+if [ -z "$unexpected_services" ]; then
+  ok "no_unexpected_openclaw_services"
+else
+  fail "unexpected_openclaw_services=$(echo "$unexpected_services" | paste -sd, -)"
+fi
+
+primary="$(docker compose -f "$COMPOSE_FILE" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config get agents.defaults.model.primary 2>/dev/null | tail -n1 || true)"
+if [ "$primary" = "$EXPECTED_MODEL" ]; then
+  ok "model_primary=$primary"
+else
+  fail "model_primary_expected=$EXPECTED_MODEL actual=${primary:-missing}"
+fi
+
+fallbacks="$(docker compose -f "$COMPOSE_FILE" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config get agents.defaults.model.fallbacks 2>/dev/null | tail -n1 || true)"
+if [ "$fallbacks" = "$EXPECTED_FALLBACKS" ]; then
+  ok "model_fallbacks=$fallbacks"
+else
+  fail "model_fallbacks_expected=$EXPECTED_FALLBACKS actual=${fallbacks:-missing}"
+fi
+
+if [ -n "$EXPECTED_AGENT_RUNTIME_ID" ]; then
+  runtime_id="$(docker compose -f "$COMPOSE_FILE" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config get agents.defaults.agentRuntime.id 2>/dev/null | tail -n1 || true)"
+  if [ "$runtime_id" = "$EXPECTED_AGENT_RUNTIME_ID" ]; then
+    ok "agent_runtime_id=$runtime_id"
+  else
+    fail "agent_runtime_id_expected=$EXPECTED_AGENT_RUNTIME_ID actual=${runtime_id:-missing}"
+  fi
+else
+  runtime_id="$(docker compose -f "$COMPOSE_FILE" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config get agents.defaults.agentRuntime.id 2>/dev/null | tail -n1 || true)"
+  if [ -z "$runtime_id" ] || [ "$runtime_id" = "undefined" ] || [ "$runtime_id" = "null" ]; then
+    ok "agent_runtime_id_unset"
+  else
+    fail "agent_runtime_id_expected_unset actual=$runtime_id"
+  fi
+fi
+
+if [[ "$EXPECTED_MODEL" == openai-codex/* || ( "$EXPECTED_MODEL" == openai/* && "$EXPECTED_AGENT_RUNTIME_ID" == "codex" ) ]]; then
+  if [ -f /var/lib/openclaw/.openclaw/agents/main/agent/auth-profiles.json ] && jq -e '.profiles | keys[] | startswith("openai-codex:")' /var/lib/openclaw/.openclaw/agents/main/agent/auth-profiles.json >/dev/null 2>&1; then
+    ok "openai_codex_auth_profile_present"
+  else
+    fail "openai_codex_auth_profile_missing"
+  fi
+fi
+
+if [ "$EXPECTED_CODEX_PLUGIN_ENABLED" = "true" ]; then
+  codex_plugin_enabled="$(docker compose -f "$COMPOSE_FILE" run --rm --no-deps --entrypoint node openclaw-gateway dist/index.js config get plugins.entries.codex.enabled 2>/dev/null | tail -n1 || true)"
+  if [ "$codex_plugin_enabled" = "true" ]; then
+    ok "codex_plugin_enabled=true"
+  else
+    fail "codex_plugin_enabled_expected=true actual=${codex_plugin_enabled:-missing}"
+  fi
+fi
+
+if has_env_value OPENCLAW_GATEWAY_TOKEN; then
+  ok "openclaw_gateway_token_set"
+else
+  fail "openclaw_gateway_token_missing"
+fi
+
+if has_env_value TELEGRAM_BOT_TOKEN; then
+  if docker compose -f "$COMPOSE_FILE" exec -T openclaw-gateway sh -lc 'curl -fsS -o /tmp/telegram-getme.json -w "%{http_code}" "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getMe"' 2>/dev/null | grep -qx 200; then
+    ok "telegram_api_getme=200"
+  else
+    fail "telegram_api_getme_failed"
+  fi
+else
+  fail "telegram_bot_token_missing"
+fi
+
+if [ -f /var/lib/openclaw/.ssh/id_ed25519_github_openclaw ]; then
+  ok "github_runtime_key_present"
+else
+  fail "github_runtime_key_missing"
+fi
+
+if docker exec openclaw-openclaw-gateway-1 sh -lc 'command -v ssh >/dev/null 2>&1' 2>/dev/null; then
+  ok "runtime_ssh_binary_present"
+else
+  fail "runtime_ssh_binary_missing"
+fi
+
+if [ "$EXPECTED_CHART_MEDIA_ENABLED" = "true" ]; then
+  if docker exec openclaw-openclaw-gateway-1 sh -lc 'test -x /home/node/.openclaw/workspace/scripts/render_chart.py' 2>/dev/null; then
+    ok "chart_media_helper_present"
+  else
+    fail "chart_media_helper_missing"
+  fi
+
+  if docker exec openclaw-openclaw-gateway-1 sh -lc 'test -f /home/node/.openclaw/workspace/skills/chart-media/SKILL.md' 2>/dev/null; then
+    ok "chart_media_skill_present"
+  else
+    fail "chart_media_skill_missing"
+  fi
+
+  if docker exec openclaw-openclaw-gateway-1 sh -lc 'python3 -c "import matplotlib; matplotlib.use(\"Agg\"); import matplotlib.pyplot"' 2>/dev/null; then
+    ok "runtime_matplotlib_ready"
+  else
+    fail "runtime_matplotlib_missing"
+  fi
+fi
+
+github_ssh_output="$(timeout 15 docker exec openclaw-openclaw-gateway-1 sh -lc 'ssh -T -o BatchMode=yes git@github.com' 2>&1 || true)"
+if echo "$github_ssh_output" | grep -qi 'successfully authenticated'; then
+  ok "runtime_github_ssh_authenticated"
+else
+  fail "runtime_github_ssh_not_authenticated"
+fi
+
+if [ -e "$BACKUP_DIR/latest.tar.gz" ]; then
+  latest_age="$(( ($(date +%s) - $(stat -c %Y "$BACKUP_DIR/latest.tar.gz")) / 3600 ))"
+  if [ "$latest_age" -le 36 ]; then
+    ok "backup_latest_age_hours=$latest_age"
+  else
+    fail "backup_latest_too_old_hours=$latest_age"
+  fi
+else
+  fail "backup_latest_missing"
+fi
+
+root_use="$(df -P / | awk 'NR==2 { gsub("%","",$5); print $5 }')"
+if [ "${root_use:-100}" -lt 85 ]; then
+  ok "disk_root_used_percent=$root_use"
+else
+  fail "disk_root_used_percent=$root_use"
+fi
+
+if [ -f /etc/docker/daemon.json ] && jq -e '."log-driver" == "json-file" and ."log-opts"."max-size" and ."log-opts"."max-file"' /etc/docker/daemon.json >/dev/null 2>&1; then
+  ok "docker_log_limits_configured"
+else
+  fail "docker_log_limits_missing"
+fi
+
+if systemctl is-enabled --quiet openclaw-vps-backup.timer; then
+  ok "backup_timer_enabled"
+else
+  fail "backup_timer_not_enabled"
+fi
+
+if systemctl is-enabled --quiet openclaw-docker-cleanup.timer; then
+  ok "docker_cleanup_timer_enabled"
+else
+  fail "docker_cleanup_timer_not_enabled"
+fi
+
+if [ "$failures" -eq 0 ]; then
+  ok "status=healthy"
+else
+  fail "status=unhealthy failures=$failures"
+fi
+
+exit "$failures"

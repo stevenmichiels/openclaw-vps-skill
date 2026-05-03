@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cmd="${1:-status}"
+shift || true
+
+needs_root() {
+  case "$cmd" in
+    status|backup|release-check|healthcheck|docker-cleanup|timers)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+if needs_root && [ "${EUID:-$(id -u)}" -ne 0 ]; then
+  exec sudo /usr/local/bin/openclaw-vps "$cmd" "$@"
+fi
+
+case "$cmd" in
+  status)
+    exec /usr/local/sbin/openclaw-vps-status "$@"
+    ;;
+  backup)
+    exec /usr/local/sbin/openclaw-vps-backup "$@"
+    ;;
+  release-check)
+    exec /usr/local/sbin/openclaw-vps-release-check "$@"
+    ;;
+  healthcheck)
+    exec /usr/local/sbin/openclaw-vps-healthcheck "$@"
+    ;;
+  docker-cleanup)
+    exec /usr/local/sbin/openclaw-docker-cleanup "$@"
+    ;;
+  timers)
+    exec systemctl list-timers --all openclaw-vps-backup.timer openclaw-docker-cleanup.timer openclaw-vps-release-check.timer openclaw-vps-healthcheck.timer
+    ;;
+  help|-h|--help)
+    cat <<'USAGE'
+Usage: openclaw-vps <command>
+
+Commands:
+  status          Run the full OpenClaw VPS healthcheck
+  backup          Create an immediate OpenClaw VPS backup
+  release-check   Check for a newer stable OpenClaw release
+  healthcheck     Run status and send Telegram transition alerts
+  docker-cleanup  Prune unused Docker containers/images/build cache
+  timers          Show OpenClaw VPS timers
+USAGE
+    ;;
+  *)
+    echo "Unknown command: $cmd" >&2
+    echo "Run: openclaw-vps help" >&2
+    exit 2
+    ;;
+esac

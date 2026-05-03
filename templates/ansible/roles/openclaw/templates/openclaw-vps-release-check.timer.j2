@@ -1,0 +1,10 @@
+[Unit]
+Description=Run OpenClaw stable release check on schedule
+
+[Timer]
+OnCalendar={{ openclaw_release_check_on_calendar | default('daily') }}
+Persistent=true
+RandomizedDelaySec=20m
+
+[Install]
+WantedBy=timers.target

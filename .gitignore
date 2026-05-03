@@ -1,0 +1,34 @@
+# Local deployment config that identifies private machines/accounts.
+/templates/ansible/inventory.ini
+/templates/ansible/vars/local.yml
+
+# Terraform/OpenTofu local state, plans, variables, and provider caches.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+tfplan
+tfplan-*
+*.tfplan
+
+# Logs and local runtime artifacts.
+*.log
+/backups/
+__pycache__/
+*.pyc
+
+# Secrets and keys.
+*.pem
+*.key
+id_rsa
+id_ed25519
+id_*
+
+# Editor and OS noise.
+.DS_Store
+*~
+*.swp
+*.swo
+.idea/
+.vscode/

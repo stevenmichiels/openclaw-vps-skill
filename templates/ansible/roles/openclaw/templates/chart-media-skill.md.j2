@@ -1,0 +1,50 @@
+---
+name: chart-media
+description: Render PNG charts and media files for Telegram, Slack, and other chat channels when users ask for charts, plots, graphs, or image output.
+---
+
+# Chart and Media Output
+
+Use this skill when a user asks for a chart, plot, graph, image, figure, or media output from Telegram, Slack, or another chat channel.
+
+## Rules
+
+- Do not rely on Canvas as the primary delivery path for chat channels.
+- Prefer PNG files saved under `/home/node/.openclaw/workspace/out`.
+- Use `/home/node/.openclaw/workspace/scripts/render_chart.py` for simple line, bar, and scatter charts.
+- For custom matplotlib plots, use the Agg backend and save the result under `/home/node/.openclaw/workspace/out`.
+- Keep generated images reasonably small for chat delivery: longest edge at or below 2048 px and file size below 10 MB.
+- In the final response, include `MEDIA:/home/node/.openclaw/workspace/out/<filename>.png` on its own line plus a short caption.
+
+## Simple Chart Flow
+
+1. Write a JSON spec under `/home/node/.openclaw/workspace/out`.
+2. Run:
+
+```sh
+python3 /home/node/.openclaw/workspace/scripts/render_chart.py --input out/chart-spec.json --output out/chart.png
+```
+
+3. Reply with:
+
+```text
+MEDIA:/home/node/.openclaw/workspace/out/chart.png
+```
+
+## Spec Shape
+
+```json
+{
+  "title": "Example",
+  "xlabel": "Month",
+  "ylabel": "Value",
+  "kind": "line",
+  "series": [
+    {
+      "label": "Series A",
+      "x": ["Jan", "Feb", "Mar"],
+      "y": [1, 2, 3]
+    }
+  ]
+}
+```

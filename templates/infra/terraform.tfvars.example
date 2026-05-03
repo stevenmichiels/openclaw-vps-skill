@@ -1,0 +1,12 @@
+server_name   = "openclaw-vps"
+image         = "ubuntu-24.04"
+server_type   = "cx33"
+location      = "fsn1"
+ssh_key_names = ["<hetzner-ssh-key-name>"]
+
+# First bootstrap: ["<your-current-public-ip>/32"]
+# After Tailscale SSH is proven: ["100.64.0.0/10"]
+ssh_source_ips = ["<bootstrap-cidr>"]
+
+allow_http  = false
+allow_https = false

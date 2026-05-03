@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+BACKUP_DIR="{{ openclaw_backup_dir | default('/var/backups/openclaw-vps') }}"
+RETENTION_DAYS="{{ openclaw_backup_retention_days | default(14) }}"
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+ARCHIVE="${BACKUP_DIR}/openclaw-vps-${STAMP}.tar.gz"
+TMP_ARCHIVE="${ARCHIVE}.tmp"
+
+mkdir -p "$BACKUP_DIR"
+chmod 0700 "$BACKUP_DIR"
+
+cd /
+tar \
+  --ignore-failed-read \
+  --warning=no-file-changed \
+  -czf "$TMP_ARCHIVE" \
+  etc/openclaw \
+  var/lib/openclaw/.openclaw \
+  var/lib/openclaw/workspace \
+  var/lib/openclaw/.ssh
+
+chmod 0600 "$TMP_ARCHIVE"
+mv "$TMP_ARCHIVE" "$ARCHIVE"
+ln -sfn "$(basename "$ARCHIVE")" "${BACKUP_DIR}/latest.tar.gz"
+
+find "$BACKUP_DIR" -maxdepth 1 -type f -name 'openclaw-vps-*.tar.gz' -mtime +"$RETENTION_DAYS" -delete
+
+printf 'backup_created=%s\n' "$ARCHIVE"

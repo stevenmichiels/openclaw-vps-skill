@@ -1,0 +1,148 @@
+- hosts: vps
+  become: true
+  vars:
+    admin_user: "admin"
+    admin_authorized_keys: []   # Add one or more SSH public keys for admin_user
+    admin_user_passwordless_sudo: true
+    disable_root_login: false
+
+    tailscale_ssh_source_cidr: "100.64.0.0/10"
+    # Fail closed for public templates: first bootstrap must set current public IP /32 locally.
+    bootstrap_public_ssh_cidr: ""
+    bootstrap_public_ssh_cidr_cleanup: ""  # Optional: previous bootstrap /32 to delete from UFW
+
+    allow_http: false
+    allow_https: false
+    enable_fail2ban_sshd: true
+
+    # Small safety net for browser/crawler memory spikes.
+    swap_enabled: true
+    swap_file_path: "/swapfile"
+    swap_size_mb: 4096
+    swap_swappiness: 10
+
+    install_claude_code: false
+    refresh_claude_code: false   # Set true to force reinstall/update Claude CLI
+    install_codex_cli: false     # Opt-in: installs Node.js/npm and @openai/codex globally.
+    install_openclaw: true
+    install_firecrawl: false
+
+    openclaw_enable_service: false
+    openclaw_runtime_mode: "container"  # container (default) or systemd
+    openclaw_update_cli: false            # systemd mode only; set true for forced npm update
+    openclaw_cli_path: "/usr/bin/openclaw"
+
+    openclaw_user: "assistant"
+    openclaw_group: "assistant"
+    openclaw_dir: "/opt/openclaw"
+    openclaw_data_dir: "/var/lib/openclaw"
+    openclaw_config_dir: "/var/lib/openclaw/.openclaw"
+    openclaw_workspace_dir: "/var/lib/openclaw/workspace"
+    openclaw_ssh_dir: "/var/lib/openclaw/.ssh"
+    openclaw_env_dir: "/etc/openclaw"
+    openclaw_env_file: "/etc/openclaw/.env"
+    openclaw_service_name: "openclaw"
+    openclaw_compose_file: "/etc/openclaw/docker-compose.yml"
+
+    openclaw_gateway_bind: "lan"               # For Docker runtime, use lan so host loopback publish works
+    openclaw_gateway_bind_address: "127.0.0.1" # host-side bind address for published ports
+    openclaw_gateway_port: 18789
+    openclaw_bridge_port: 18790
+    openclaw_gateway_allow_unconfigured: false
+    openclaw_auto_generate_gateway_token: false  # Opt-in: generate if token is missing/placeholder.
+
+    # Runtime image: derived locally from the pinned upstream image to add missing runtime tools.
+    openclaw_container_base_image: "ghcr.io/openclaw/openclaw:2026.5.2"
+    openclaw_container_image: "openclaw-runtime:2026.5.2-tools"
+    openclaw_build_runtime_image: true
+    openclaw_runtime_image_rebuild: false
+    openclaw_chart_media_enabled: true
+    openclaw_tz: "UTC"
+    openclaw_compose_pull: false
+
+    openclaw_backup_dir: "/var/backups/openclaw-vps"
+    openclaw_backup_retention_days: 14
+    openclaw_backup_timer_enabled: true
+    openclaw_backup_on_calendar: "daily"
+    openclaw_docker_cleanup_timer_enabled: true
+    openclaw_docker_cleanup_on_calendar: "weekly"
+    openclaw_release_check_timer_enabled: true
+    openclaw_release_check_on_calendar: "daily"
+    openclaw_healthcheck_timer_enabled: true
+    openclaw_healthcheck_on_calendar: "*:0/5"
+    openclaw_monitor_state_dir: "/var/lib/openclaw-vps-monitor"
+
+    # Cost profile (official OpenClaw knobs: cacheRetention/contextPruning/heartbeat/model fallbacks).
+    openclaw_cost_profile_enabled: true
+    openclaw_cost_profile_cache_retention: "short"          # none | short | long
+    openclaw_cost_profile_context_pruning_ttl: "55m"        # e.g. 30m, 55m, 1h
+    openclaw_cost_profile_heartbeat_every: "55m"            # set "0m" to disable heartbeat runs
+    openclaw_cost_profile_heartbeat_light_context: true
+    openclaw_cost_profile_heartbeat_isolated_session: true
+    openclaw_cost_profile_heartbeat_target: "slack"         # none | last | telegram | slack | ...
+    openclaw_cost_profile_heartbeat_model: ""               # optional dedicated heartbeat model override
+    # ChatGPT/Codex subscription route for pinned OpenClaw 2026.5.2.
+    # The runtime exposes Codex OAuth auth through the openai-codex provider.
+    openclaw_codex_plugin_enabled: true
+    openclaw_agent_runtime_id: ""
+    openclaw_cost_profile_model_primary: "openai-codex/gpt-5.5"
+    openclaw_cost_profile_model_fallbacks: []
+
+    # Optional private Firecrawl stack.
+    firecrawl_enable_service: false
+    firecrawl_allow_floating_images: false
+    firecrawl_env_dir: "/etc/firecrawl"
+    firecrawl_env_file: "/etc/firecrawl/firecrawl.env"
+    firecrawl_dir: "/opt/firecrawl"
+    firecrawl_compose_file: "/opt/firecrawl/docker-compose.yml"
+    firecrawl_api_bind_address: "127.0.0.1"
+    firecrawl_api_port: 3002
+    firecrawl_internal_port: 3002
+    # Inert while install_firecrawl=false; refused unless firecrawl_allow_floating_images=true.
+    # Pin tags/digests in local vars before enabling Firecrawl for repeatability.
+    firecrawl_image: "ghcr.io/firecrawl/firecrawl:latest"
+    firecrawl_playwright_image: "ghcr.io/firecrawl/playwright-service:latest"
+    firecrawl_postgres_image: "ghcr.io/firecrawl/nuq-postgres:latest"
+    firecrawl_postgres_user: "firecrawl"
+    firecrawl_postgres_db: "postgres"  # Required by upstream nuq-postgres pg_cron config.
+    firecrawl_auto_generate_secrets: true
+    firecrawl_compose_pull: false
+    firecrawl_num_workers_per_queue: 2
+    firecrawl_crawl_concurrent_requests: 2
+    firecrawl_max_concurrent_jobs: 1
+    firecrawl_browser_pool_size: 1
+    firecrawl_playwright_cpus: "1.0"
+    firecrawl_playwright_mem_limit: "1536m"
+    firecrawl_api_cpus: "2.0"
+    firecrawl_api_mem_limit: "3g"
+    firecrawl_max_cpu: "0.85"
+    firecrawl_max_ram: "0.85"
+    firecrawl_block_media: true
+    firecrawl_logging_level: "INFO"
+
+    auto_reboot: true
+    auto_reboot_time: "03:30"
+
+    app_dir: "/opt/app"
+    app_service_name: "sample-app"
+    app_message: "Hello from sample app"
+  pre_tasks:
+    - name: Check for local OpenClaw VPS config
+      stat:
+        path: "{{ playbook_dir }}/vars/local.yml"
+      register: openclaw_vps_local_config
+      tags: always
+
+    - name: Load local OpenClaw VPS config
+      include_vars:
+        file: "{{ playbook_dir }}/vars/local.yml"
+      when: openclaw_vps_local_config.stat.exists
+      tags: always
+  roles:
+    - base
+    - security
+    - app
+    - role: openclaw
+      when: install_openclaw | bool
+    - role: firecrawl
+      when: install_firecrawl | bool

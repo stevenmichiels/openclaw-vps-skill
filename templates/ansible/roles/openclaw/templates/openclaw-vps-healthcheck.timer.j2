@@ -1,0 +1,10 @@
+[Unit]
+Description=Run OpenClaw VPS healthcheck on schedule
+
+[Timer]
+OnCalendar={{ openclaw_healthcheck_on_calendar | default('*:0/5') }}
+Persistent=true
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,33 @@
+[Unit]
+Description=OpenClaw Gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ openclaw_user }}
+Group={{ openclaw_group }}
+WorkingDirectory={{ openclaw_dir }}
+EnvironmentFile={{ openclaw_env_file }}
+Environment=HOME={{ openclaw_data_dir }}
+ExecStart={{ openclaw_cli_path }} gateway --bind {{ openclaw_gateway_bind | default('loopback') }} --port {{ openclaw_gateway_port | default(18789) }} {{ '--allow-unconfigured' if (openclaw_gateway_allow_unconfigured | default(false)) else '' }}
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths={{ openclaw_data_dir }} {{ openclaw_config_dir }} {{ openclaw_workspace_dir }}
+
+[Install]
+WantedBy=multi-user.target

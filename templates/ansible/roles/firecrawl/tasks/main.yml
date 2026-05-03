@@ -1,0 +1,237 @@
+- name: Validate Firecrawl bind address
+  assert:
+    that:
+      - >-
+        (firecrawl_api_bind_address | default('127.0.0.1')) in ['127.0.0.1', 'localhost', '::1']
+        or (firecrawl_allow_public_bind | default(false) | bool)
+    fail_msg: "Firecrawl must bind to loopback unless firecrawl_allow_public_bind=true is explicitly set."
+
+- name: Validate Firecrawl Postgres database
+  assert:
+    that:
+      - (firecrawl_postgres_db | default('postgres')) == 'postgres'
+    fail_msg: "Use POSTGRES_DB=postgres with upstream nuq-postgres because pg_cron is configured for database postgres."
+
+- name: Validate Firecrawl image pins
+  assert:
+    that:
+      - >-
+        (firecrawl_allow_floating_images | default(false) | bool)
+        or not ((firecrawl_image | default('ghcr.io/firecrawl/firecrawl:latest')) is search(':latest$'))
+      - >-
+        (firecrawl_allow_floating_images | default(false) | bool)
+        or not ((firecrawl_playwright_image | default('ghcr.io/firecrawl/playwright-service:latest')) is search(':latest$'))
+      - >-
+        (firecrawl_allow_floating_images | default(false) | bool)
+        or not ((firecrawl_postgres_image | default('ghcr.io/firecrawl/nuq-postgres:latest')) is search(':latest$'))
+    fail_msg: "Pin Firecrawl images to explicit tags/digests, or set firecrawl_allow_floating_images=true deliberately."
+
+- name: Install Firecrawl runtime packages
+  apt:
+    name:
+      - docker.io
+      - docker-compose-v2
+      - curl
+      - jq
+      - openssl
+    state: present
+
+- name: Ensure Docker daemon is enabled and started for Firecrawl
+  systemd:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Ensure Firecrawl directories exist
+  file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ firecrawl_dir | default('/opt/firecrawl') }}"
+      owner: root
+      group: root
+      mode: "0755"
+    - path: "{{ firecrawl_env_dir | default('/etc/firecrawl') }}"
+      owner: root
+      group: "{{ admin_user | default('root') }}"
+      mode: "0750"
+
+- name: Install Firecrawl compose file
+  template:
+    src: docker-compose.yml.j2
+    dest: "{{ firecrawl_compose_file | default('/opt/firecrawl/docker-compose.yml') }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Create Firecrawl env file if missing
+  template:
+    src: firecrawl.env.j2
+    dest: "{{ firecrawl_env_file | default('/etc/firecrawl/firecrawl.env') }}"
+    owner: root
+    group: root
+    mode: "0600"
+    force: false
+
+- name: Ensure Firecrawl non-secret env defaults are present
+  lineinfile:
+    path: "{{ firecrawl_env_file | default('/etc/firecrawl/firecrawl.env') }}"
+    regexp: "^{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+  loop:
+    - key: FIRECRAWL_IMAGE
+      value: "{{ firecrawl_image | default('ghcr.io/firecrawl/firecrawl:latest') }}"
+    - key: FIRECRAWL_PLAYWRIGHT_IMAGE
+      value: "{{ firecrawl_playwright_image | default('ghcr.io/firecrawl/playwright-service:latest') }}"
+    - key: FIRECRAWL_POSTGRES_IMAGE
+      value: "{{ firecrawl_postgres_image | default('ghcr.io/firecrawl/nuq-postgres:latest') }}"
+    - key: PORT
+      value: "{{ firecrawl_api_port | default(3002) }}"
+    - key: INTERNAL_PORT
+      value: "{{ firecrawl_internal_port | default(3002) }}"
+    - key: USE_DB_AUTHENTICATION
+      value: "{{ (firecrawl_use_db_authentication | default(false)) | ternary('true', 'false') }}"
+    - key: POSTGRES_USER
+      value: "{{ firecrawl_postgres_user | default('firecrawl') }}"
+    - key: POSTGRES_DB
+      value: "{{ firecrawl_postgres_db | default('postgres') }}"
+    - key: NUM_WORKERS_PER_QUEUE
+      value: "{{ firecrawl_num_workers_per_queue | default(2) }}"
+    - key: CRAWL_CONCURRENT_REQUESTS
+      value: "{{ firecrawl_crawl_concurrent_requests | default(2) }}"
+    - key: MAX_CONCURRENT_JOBS
+      value: "{{ firecrawl_max_concurrent_jobs | default(1) }}"
+    - key: BROWSER_POOL_SIZE
+      value: "{{ firecrawl_browser_pool_size | default(1) }}"
+    - key: PLAYWRIGHT_CPUS
+      value: "{{ firecrawl_playwright_cpus | default('1.0') }}"
+    - key: PLAYWRIGHT_MEM_LIMIT
+      value: "{{ firecrawl_playwright_mem_limit | default('1536m') }}"
+    - key: API_CPUS
+      value: "{{ firecrawl_api_cpus | default('2.0') }}"
+    - key: API_MEM_LIMIT
+      value: "{{ firecrawl_api_mem_limit | default('3g') }}"
+    - key: MAX_CPU
+      value: "{{ firecrawl_max_cpu | default('0.85') }}"
+    - key: MAX_RAM
+      value: "{{ firecrawl_max_ram | default('0.85') }}"
+    - key: BLOCK_MEDIA
+      value: "{{ (firecrawl_block_media | default(true)) | ternary('true', 'false') }}"
+    - key: LOGGING_LEVEL
+      value: "{{ firecrawl_logging_level | default('INFO') }}"
+    - key: FIRECRAWL_OPENCLAW_NETWORK
+      value: "{{ firecrawl_openclaw_network | default('openclaw_default') }}"
+
+- name: Read Firecrawl env file for secret management
+  slurp:
+    src: "{{ firecrawl_env_file | default('/etc/firecrawl/firecrawl.env') }}"
+  register: firecrawl_env_for_secret_management
+
+- name: Detect whether Firecrawl secrets need generation
+  set_fact:
+    firecrawl_postgres_password_needs_generation: >-
+      {{
+        ((firecrawl_env_for_secret_management.content | b64decode | regex_search('(?m)^POSTGRES_PASSWORD=')) is none)
+        or
+        ((firecrawl_env_for_secret_management.content | b64decode | regex_search('(?m)^POSTGRES_PASSWORD=(?:__SET_ME__)?\\s*$')) is not none)
+      }}
+    firecrawl_bull_auth_key_needs_generation: >-
+      {{
+        ((firecrawl_env_for_secret_management.content | b64decode | regex_search('(?m)^BULL_AUTH_KEY=')) is none)
+        or
+        ((firecrawl_env_for_secret_management.content | b64decode | regex_search('(?m)^BULL_AUTH_KEY=(?:__SET_ME__)?\\s*$')) is not none)
+      }}
+
+- name: Generate Firecrawl Postgres password when enabled and placeholder/missing
+  command: openssl rand -hex 24
+  register: firecrawl_generated_postgres_password
+  changed_when: true
+  no_log: true
+  when:
+    - firecrawl_auto_generate_secrets | default(true) | bool
+    - firecrawl_postgres_password_needs_generation | bool
+
+- name: Generate Firecrawl Bull auth key when enabled and placeholder/missing
+  command: openssl rand -hex 24
+  register: firecrawl_generated_bull_auth_key
+  changed_when: true
+  no_log: true
+  when:
+    - firecrawl_auto_generate_secrets | default(true) | bool
+    - firecrawl_bull_auth_key_needs_generation | bool
+
+- name: Write generated Firecrawl Postgres password to env file
+  lineinfile:
+    path: "{{ firecrawl_env_file | default('/etc/firecrawl/firecrawl.env') }}"
+    regexp: '^POSTGRES_PASSWORD='
+    line: "POSTGRES_PASSWORD={{ firecrawl_generated_postgres_password.stdout }}"
+    insertafter: EOF
+  no_log: true
+  when:
+    - firecrawl_auto_generate_secrets | default(true) | bool
+    - firecrawl_postgres_password_needs_generation | bool
+
+- name: Write generated Firecrawl Bull auth key to env file
+  lineinfile:
+    path: "{{ firecrawl_env_file | default('/etc/firecrawl/firecrawl.env') }}"
+    regexp: '^BULL_AUTH_KEY='
+    line: "BULL_AUTH_KEY={{ firecrawl_generated_bull_auth_key.stdout }}"
+    insertafter: EOF
+  no_log: true
+  when:
+    - firecrawl_auto_generate_secrets | default(true) | bool
+    - firecrawl_bull_auth_key_needs_generation | bool
+
+- name: Read Firecrawl env file before enabling service
+  slurp:
+    src: "{{ firecrawl_env_file | default('/etc/firecrawl/firecrawl.env') }}"
+  register: firecrawl_env_raw
+  when: firecrawl_enable_service | default(false) | bool
+
+- name: Refuse to enable Firecrawl with placeholder secrets
+  assert:
+    that:
+      - "(firecrawl_env_raw.content | b64decode | regex_search('(?m)^POSTGRES_PASSWORD=')) is not none"
+      - "(firecrawl_env_raw.content | b64decode | regex_search('(?m)^POSTGRES_PASSWORD=(?:__SET_ME__)?\\s*$')) is none"
+      - "(firecrawl_env_raw.content | b64decode | regex_search('(?m)^BULL_AUTH_KEY=')) is not none"
+      - "(firecrawl_env_raw.content | b64decode | regex_search('(?m)^BULL_AUTH_KEY=(?:__SET_ME__)?\\s*$')) is none"
+      - "(firecrawl_env_raw.content | b64decode | regex_search('(?m)^POSTGRES_DB=postgres\\s*$')) is not none"
+    fail_msg: "Set POSTGRES_PASSWORD, BULL_AUTH_KEY, and POSTGRES_DB=postgres in Firecrawl env before enabling service."
+  when: firecrawl_enable_service | default(false) | bool
+
+- name: Pull Firecrawl images when enabled
+  command: >-
+    docker compose --env-file "{{ firecrawl_env_file | default('/etc/firecrawl/firecrawl.env') }}"
+    -f "{{ firecrawl_compose_file | default('/opt/firecrawl/docker-compose.yml') }}" pull
+  register: firecrawl_compose_pull_result
+  changed_when: >
+    (
+      (firecrawl_compose_pull_result.stdout | default('')) ~ '\n' ~
+      (firecrawl_compose_pull_result.stderr | default(''))
+    ) is search('Downloaded newer image|Pull complete|Status: Downloaded newer image|Downloaded|Pulling fs layer')
+  when:
+    - firecrawl_enable_service | default(false) | bool
+    - firecrawl_compose_pull | default(false) | bool
+
+- name: Start Firecrawl container stack
+  command: >-
+    docker compose --env-file "{{ firecrawl_env_file | default('/etc/firecrawl/firecrawl.env') }}"
+    -f "{{ firecrawl_compose_file | default('/opt/firecrawl/docker-compose.yml') }}" up -d
+  register: firecrawl_compose_up_result
+  changed_when: >
+    (
+      (firecrawl_compose_up_result.stdout | default('')) ~ '\n' ~
+      (firecrawl_compose_up_result.stderr | default(''))
+    ) is search('Creating|Recreating|Starting|Stopping|Removing|Created|Pulled')
+  when: firecrawl_enable_service | default(false) | bool
+
+- name: Stop Firecrawl container stack when disabled
+  command: >-
+    docker compose --env-file "{{ firecrawl_env_file | default('/etc/firecrawl/firecrawl.env') }}"
+    -f "{{ firecrawl_compose_file | default('/opt/firecrawl/docker-compose.yml') }}" down
+  failed_when: false
+  changed_when: false
+  when: not (firecrawl_enable_service | default(false) | bool)

@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -u
+umask 077
+
+ENV_FILE="{{ openclaw_env_file }}"
+STATE_DIR="{{ openclaw_monitor_state_dir | default('/var/lib/openclaw-vps-monitor') }}"
+STATUS_FILE="${STATE_DIR}/health-status"
+OUTPUT_FILE="${STATE_DIR}/last-health-output.txt"
+
+mkdir -p "$STATE_DIR"
+chmod 0700 "$STATE_DIR"
+
+telegram_recipients() {
+  local allow_file="/var/lib/openclaw/.openclaw/credentials/telegram-default-allowFrom.json"
+  [ -f "$allow_file" ] || return 0
+  jq -r '
+    def walkids:
+      if type == "string" or type == "number" then tostring
+      elif type == "array" then .[] | walkids
+      elif type == "object" then (keys[] | tostring), (.[] | walkids)
+      else empty end;
+    walkids
+    | sub("^telegram:"; "")
+    | select(test("^-?[0-9]+$"))
+  ' "$allow_file" | sort -u
+}
+
+send_telegram() {
+  local text="$1" token recipients
+  token="$(grep -E '^TELEGRAM_BOT_TOKEN=' "$ENV_FILE" 2>/dev/null | cut -d= -f2- || true)"
+  [ -n "$token" ] || return 0
+  recipients="$(telegram_recipients || true)"
+  [ -n "$recipients" ] || return 0
+  while IFS= read -r chat_id; do
+    [ -n "$chat_id" ] || continue
+    curl -fsS -X POST "https://api.telegram.org/bot${token}/sendMessage" \
+      -d "chat_id=${chat_id}" \
+      --data-urlencode "text=${text}" >/dev/null || true
+  done <<< "$recipients"
+}
+
+previous="$(cat "$STATUS_FILE" 2>/dev/null || echo unknown)"
+
+if /usr/local/sbin/openclaw-vps-status > "$OUTPUT_FILE" 2>&1; then
+  printf 'healthy\n' > "$STATUS_FILE"
+  if [ "$previous" = "unhealthy" ]; then
+    send_telegram "OpenClaw VPS recovered: status is healthy again."
+  fi
+  cat "$OUTPUT_FILE"
+  exit 0
+fi
+
+rc=$?
+printf 'unhealthy\n' > "$STATUS_FILE"
+
+if [ "$previous" != "unhealthy" ]; then
+  summary="$(tail -n 12 "$OUTPUT_FILE")"
+  send_telegram "OpenClaw VPS alert: healthcheck failed with exit ${rc}.\n\n${summary}"
+fi
+
+cat "$OUTPUT_FILE"
+exit "$rc"
