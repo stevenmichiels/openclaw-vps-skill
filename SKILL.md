@@ -81,12 +81,13 @@ Provision and harden a Hetzner Cloud VPS in a repeatable, safe-by-default workfl
 11) Do not expose `/root/.ssh` to OpenClaw runtime. Use dedicated runtime SSH key in `/var/lib/openclaw/.ssh`.
 
 ## Credential loading (Hetzner token)
-- Preferred/default path: use shell helper `hcloudtoken` when available.
-- If your shell defines the helper in a profile file, load that profile first.
-- Run the helper in the active shell: `hcloudtoken`
-- Export Terraform var from helper env: `export TF_VAR_hcloud_token="$HCLOUD_TOKEN"`
-- Never use command substitution with helper (`TF_VAR_hcloud_token="$(hcloudtoken)"`) because helper prints status text.
-- Fallback: export `TF_VAR_hcloud_token` from secure secret source before Terraform commands.
+- Preferred/default path for local controller work: use the protected `hctf` wrapper when available.
+- `hctf` loads the Hetzner token from macOS Keychain service `hcloud-token` and injects `HCLOUD_TOKEN` plus `TF_VAR_hcloud_token` only into one Terraform child process.
+- Safe plan example: `hctf -chdir=templates/infra plan -input=false`.
+- Allowed helper subcommands should be limited to `fmt`, `init`, `validate`, `plan`, `show`, `state`, `import`, `providers`, `output`, and `version`.
+- The helper must refuse `apply` and `destroy`; Steven applies manually after reviewing an approved saved plan.
+- If `hctf` is unavailable, export `TF_VAR_hcloud_token` from a secure source for one command only. Never print the token, use command substitution around token helpers, or commit tfvars/state/plans.
+- Optional macOS Keychain storage, outside the repo: `security add-generic-password -a "$USER" -s hcloud-token -w '<paste-token-here>'`.
 
 ## GitHub CLI on VPS (optional, recommended for repo operations)
 - Install:
